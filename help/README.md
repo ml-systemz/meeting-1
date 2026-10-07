@@ -1,7 +1,7 @@
 # help
 
-- [`setup.md`](setup.md) — create a node, what is on the image, stop the meter
-- [`pallas.md`](pallas.md) — the two traps, and how to debug the recurrence
-
-The scaffolding in `kernel.py` already works around both traps. Read
-`pallas.md` when you start changing the parts that were given to you.
+- [`setup.md`](setup.md) — get a machine, what's on it, stop the meter
+- [`pallas.md`](pallas.md) — the traps that cost an hour each
+- [`debug.md`](debug.md) — symptom to cause to fix
+- [`debug.sh`](debug.sh) — `help/debug.sh` checks the whole chain and tells you
+  which link is broken

@@ -1,67 +1,64 @@
-# meeting-1 — flash attention from the inside
+# meeting-1 — three Pallas kernels
 
-## The objective
+Three kernels to write on an H100, in [Pallas](https://docs.jax.dev/en/latest/pallas/).
+Short, medium, large. Each one teaches something the last one didn't.
 
-Write the inner loop of a flash attention kernel in Pallas, on an H100.
+```
+kernel/kernel1.py   rmsnorm     grid, BlockSpec, refs, reductions
+kernel/kernel2.py   matmul      tiling over K, tensor cores, block sizes
+kernel/kernel3.py   attention   fusing two matmuls, online softmax, carried state
+```
 
-Everything around it is already done: the `pallas_call`, the grid, the block
-specs, the backend flags. You write the **online softmax recurrence** — the
-four lines FlashAttention is actually famous for. They live in `body()` in
-`kernel.py`.
+Each file is an empty function. Write it.
+
+## Running them
 
 ```sh
-python3 bench.py --check-only   # correctness only, fast
-python3 bench.py                # S=2048
-python3 bench.py --big          # S=8192, the number that counts
+bench/run.sh 1 --m 8192 --n 4096
+bench/run.sh 2 --m 4096 --k 4096 --n 4096
+bench/run.sh 3 --b 4 --s 4096 --h 16 --d 128
 ```
 
-## Why this and not something else
+That creates your H100 if you don't have one, copies your kernel up, checks it
+against a reference, and times it. Pass anything else your kernel takes with
+`--kw`:
 
-The naive implementation builds the full `seq x seq` score matrix. At S=8192
-that is **17 GB** of HBM traffic for a result that only needs a few hundred MB.
-Flash attention never materialises it: walk k/v in tiles, carry a running
-softmax, rescale when the running max moves.
+```sh
+bench/run.sh 2 --m 8192 --k 8192 --n 8192 --kw block_m=128 --kw block_k=64
+```
 
-That one idea is worth about **2x**, measured on the hardware below.
+Set `MLSYS_NODE` to use a node by a different name. Setup is in
+[help/setup.md](help/setup.md).
 
-## The ladder
+## What you're aiming at
 
-Measured on one H100 80GB HBM3, CUDA 12.9, JAX 0.11.1, bf16,
-B=4 S=8192 H=16 D=128, clocks locked:
+Measured on one H100 80GB, bf16, clocks locked. "first attempt" is a correct
+but unconsidered implementation — it's what you should expect to beat.
 
-| | time | vs naive | % of bf16 peak |
-| --- | ---: | ---: | ---: |
-| naive (materialises scores) | 12,529 µs | 1.00x | 17.7% |
-| **what you are writing** | ~6,700 µs | ~1.87x | ~33% |
-| Pallas library `mha` | 6,317 µs | 1.98x | 35.2% |
-| cuDNN flash | 3,830 µs | 3.27x | 58.1% |
-| FLOP floor | 2,223 µs | 5.63x | 100% |
+| | first attempt | xla/cublas | floor | bound |
+| --- | ---: | ---: | ---: | --- |
+| rmsnorm `M=8192 N=4096` | 725 µs | 110 µs | 40 µs | memory |
+| matmul `4096³` | 246 µs | 213 µs | 139 µs | compute |
+| attention `B=4 S=4096 H=16 D=128` | 1825 µs | 3536 µs | 556 µs | compute |
 
-**You will not beat cuDNN, and that is the interesting part.** A correct,
-reasonable tiled kernel lands around a third of peak. cuDNN gets 58%. The
-distance between those two numbers is warp specialisation, TMA, and WGMMA
-pipelining — which is the conversation this session exists to start.
+Three different situations, on purpose:
 
-There is no leaderboard. The target is physics, and everyone can see how far
-off it they are.
+- **rmsnorm** moves more bytes than it does arithmetic, so the only thing that
+  matters is whether you're saturating memory bandwidth. A first attempt gets
+  5% of the roofline and loses to XLA by 6x. Finding the 6x is the exercise.
+- **matmul** is the opposite — enough arithmetic to be compute-bound, so this
+  is about keeping the tensor cores fed. cuBLAS is a serious opponent and you
+  can get close to it.
+- **attention** is neither thing alone. The naive version builds the whole
+  `S x S` score matrix; at `S=16384` that's 69 GB and it simply OOMs. Your
+  kernel is the only thing that runs at all.
 
-## What this is not
+The floor is physics: 989 TFLOP/s bf16, 3.35 TB/s HBM3. Nobody reaches it.
 
-Not a megakernel. We checked: `jax.jit` on a fused MLP block already reaches
-**92–111% of its theoretical floor**, so a hand-written MLP kernel loses to the
-compiler. Attention is the place where hand-written tiling still wins, because
-the quadratic intermediate is something XLA will not restructure away.
-
-## Setup
-
-See [`help/setup.md`](help/setup.md). One command creates a node with
-everything preinstalled — nobody installs anything.
-
-## Files
+## Layout
 
 ```
-kernel.py     edit this, and only this
-bench.py      correctness + timing. do not edit
-solution.py   a working answer. open it when you want to, not before
-help/         setup and the two Pallas traps that will cost you an hour
+kernel/   the three files you edit
+bench/    run.sh drives the H100, bench.py does the measuring
+help/     setup, debugging, and the Pallas traps worth knowing
 ```
